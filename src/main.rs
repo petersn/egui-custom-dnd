@@ -74,6 +74,7 @@ pub struct DndDemo {
   elements:            Vec<Element>,
   drag_state:          Option<DragState>,
   drop_region_hovered: bool,
+  split_point:         usize,
 }
 
 impl DndDemo {
@@ -82,6 +83,7 @@ impl DndDemo {
       elements:     (1..=5).map(Element::from_value).collect(),
       drag_state:   None,
       drop_region_hovered: false,
+      split_point:  0,
     }
   }
 
@@ -109,7 +111,6 @@ impl DndDemo {
       .count();
     let mut drag_y = -(count_before_drag_element as f32) * ITEM_HEIGHT;
     let mut target_y = -(selected_count_before_drag_element as f32) * ITEM_HEIGHT;
-    println!("Drag y: {} -- Target y: {}", drag_y, target_y);
     for element in &mut self.elements {
       if element.is_selected || element.id == dragged_id {
         element.drag_y = SlewPair { current: drag_y, target: target_y };
@@ -120,6 +121,12 @@ impl DndDemo {
   }
 
   fn clear_drag_state(&mut self) {
+    // Complete the drag if the mouse is in the right region.
+    let (before, after) = self.elements.split_at(self.split_point);
+    let before = before.iter().filter(|e| !Self::is_part_of_drag(&self.drag_state, e));
+    let middle = self.elements.iter().filter(|e| Self::is_part_of_drag(&self.drag_state, e));
+    let after = after.iter().filter(|e| !Self::is_part_of_drag(&self.drag_state, e));
+    self.elements = before.chain(middle).chain(after).cloned().collect();
     self.drag_state = None;
   }
 
@@ -157,7 +164,7 @@ impl DndDemo {
       if !force_show && Self::is_part_of_drag(&drag_state, element) {
         return;
       }
-      let color = match (element.is_selected, response.hovered()) {
+      let color = match (element.is_selected, response.hovered() || force_show) {
         (true, _) => egui::Color32::from_rgb(100, 100, 250),
         (false, true) => egui::Color32::from_rgb(100, 100, 175),
         (false, false) => egui::Color32::from_rgb(100, 100, 100),
@@ -206,7 +213,7 @@ impl DndDemo {
 
     let drag_count = self.elements.iter().filter(|element| Self::is_part_of_drag(&self.drag_state, element)).count();
 
-    let mut split_point = 0;
+    self.split_point = 0;
     let mut window_open = true;
     let mut begin_drag_args = None;
 
@@ -244,21 +251,20 @@ impl DndDemo {
         //   hide_me: is_part_of_drag,
         // });
         if !is_part_of_drag && mouse_pos.y > rect.center().y {
-          split_point = element_index + 1;
+          self.split_point = element_index + 1;
         }
       }
     });
 
     if let Some((element_left_top, dragged_id)) = begin_drag_args {
-      println!("Begin drag!");
       self.begin_drag(mouse_pos, element_left_top, dragged_id);
     }
 
     if have_active_drag {
-      //println!("Split point: {}", split_point);
+      //println!("Split point: {}", self.split_point);
       let mut y = 0.0;
       for (element_index, element) in self.elements.iter_mut().enumerate() {
-        if element_index == split_point {
+        if element_index == self.split_point {
           y += ITEM_HEIGHT * drag_count as f32;
         }
         if !Self::is_part_of_drag(&self.drag_state, element) {
@@ -269,27 +275,7 @@ impl DndDemo {
     }
     // if drag_state_was_some && !is_anything_being_dragged && self.inhibit_drop == 0 {
     //   println!("Complete drag!");
-    //   // Complete the drag if the mouse is in the right region.
-    //   if drop_region_hovered {
-    //     println!("Drop region hovered: {}", split_point);
-    //     let mut new_elements = Vec::new();
-    //     for (index, element) in self.elements.borrow().iter().enumerate() {
-    //       if index == split_point {
-    //         println!("Inserting drag elements");
-    //         for element in self.elements.borrow().iter() {
-    //           if element.is_selected {
-    //             println!("  Inserting element {}", element.value);
-    //             new_elements.push(element.clone());
-    //           }
-    //         }
-    //       }
-    //       if !element.hide_me {
-    //         println!("Inserting element {}", element.value);
-    //         new_elements.push(element.clone());
-    //       }
-    //     }
-    //     *self.elements.borrow_mut() = new_elements;
-    //   }
+
     // }
 
     if let Some(drag_state) = &mut self.drag_state {
