@@ -1,5 +1,7 @@
+#![feature(let_chains)]
+
 use std::{
-  sync::atomic::AtomicU64,
+  sync::atomic::AtomicU64, time::Instant,
 };
 
 use eframe::{egui, epaint::{pos2, vec2}};
@@ -36,54 +38,67 @@ struct DragState {
 }
 
 #[derive(Clone)]
+enum ElementContents {
+  Value(i32),
+  Header(String),
+}
+
+#[derive(Clone)]
 struct Element {
   id:           u64,
-  value:        i32,
   list_y:       SlewPair,
   drag_y:       SlewPair,
   is_selected:  bool,
+  contents:     ElementContents,
 }
 
 impl Element {
-  fn from_value(value: i32) -> Self {
+  fn from_value(contents: ElementContents) -> Self {
     Self {
       id: new_scratch_nonce(),
-      value,
       list_y: SlewPair::default(),
       drag_y: SlewPair::default(),
       is_selected: false,
+      contents,
     }
   }
 }
 
-// struct ElementRenderRequest<'a> {
-//   demo:    &'a mut DndDemo,
-//   index:   usize,
-//   hide_me: bool,
-// }
+const MAX_CLICK_RECORDS: usize = 4;
 
-// impl<'a> egui::Widget for ElementRenderRequest<'a> {
-//   fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-//     let ElementRenderRequest { demo, index, hide_me } = self;
-    
-//     .response
-//   }
-// }
+struct ClickRecord {
+  id: u64,
+  index: usize,
+  time: Instant,
+  ctrl_held: bool,
+}
 
 pub struct DndDemo {
   elements:            Vec<Element>,
   drag_state:          Option<DragState>,
   drop_region_hovered: bool,
   split_point:         usize,
+  last_few_clicks:     Vec<ClickRecord>,
 }
 
 impl DndDemo {
   pub fn new() -> Self {
     Self {
-      elements:     (1..=5).map(Element::from_value).collect(),
+      elements:     vec![
+        Element::from_value(ElementContents::Header("Group A".to_string())),
+        Element::from_value(ElementContents::Value(1)),
+        Element::from_value(ElementContents::Value(2)),
+        Element::from_value(ElementContents::Value(3)),
+        Element::from_value(ElementContents::Header("Group B".to_string())),
+        Element::from_value(ElementContents::Value(4)),
+        Element::from_value(ElementContents::Value(5)),
+        Element::from_value(ElementContents::Value(6)),
+        Element::from_value(ElementContents::Value(7)),
+      ],
       drag_state:   None,
       drop_region_hovered: false,
       split_point:  0,
+      last_few_clicks: Vec::new(),
     }
   }
 
@@ -121,6 +136,11 @@ impl DndDemo {
   }
 
   fn clear_drag_state(&mut self) {
+    if !Self::have_active_drag(&self.drag_state) {
+      self.drag_state = None;
+      return;
+    }
+    println!("Clear drag!");
     // Complete the drag if the mouse is in the right region.
     let (before, after) = self.elements.split_at(self.split_point);
     let before = before.iter().filter(|e| !Self::is_part_of_drag(&self.drag_state, e));
@@ -128,6 +148,10 @@ impl DndDemo {
     let after = after.iter().filter(|e| !Self::is_part_of_drag(&self.drag_state, e));
     self.elements = before.chain(middle).chain(after).cloned().collect();
     self.drag_state = None;
+    // Clear selection.
+    for element in &mut self.elements {
+      element.is_selected = false;
+    }
   }
 
   fn have_active_drag(drag_state: &Option<DragState>) -> bool {
@@ -135,6 +159,9 @@ impl DndDemo {
   }
 
   fn is_part_of_drag(drag_state: &Option<DragState>, element: &Element) -> bool {
+    if matches!(element.contents, ElementContents::Header(_)) {
+      return false;
+    }
     Self::have_active_drag(drag_state) && match &drag_state {
       Some(state) => state.dragged_id == element.id || element.is_selected,
       None => false,
@@ -145,41 +172,69 @@ impl DndDemo {
     force_show: bool,
     drag_state: &Option<DragState>,
     begin_drag_args: &mut Option<(egui::Pos2, u64)>,
+    clear_drag_flag: &mut bool,
+    last_few_clicks: &mut Vec<ClickRecord>,
+    range_select: &mut Option<(u64, u64)>,
+    clear_selection: &mut bool,
     element: &mut Element,
+    element_index: usize,
     ui: &mut egui::Ui,
   ) {
     ui.horizontal(|ui| {
-      let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click_and_drag());
-      if response.clicked_by(egui::PointerButton::Primary) {
-        println!("Clicked!");
-        // FIXME: Implement shift click to select a range.
-        // Toggle selection.
-        element.is_selected ^= true;
-        println!("Selected: {}", element.is_selected);
-      }
-      if response.drag_started_by(egui::PointerButton::Primary) {
-        *begin_drag_args = Some((rect.left_top(), element.id));
-      }
-      if !force_show && Self::is_part_of_drag(&drag_state, element) {
-        return;
-      }
-      let color = match (element.is_selected, response.hovered() || force_show) {
-        (true, _) => egui::Color32::from_rgb(100, 100, 250),
-        (false, true) => egui::Color32::from_rgb(100, 100, 175),
-        (false, false) => egui::Color32::from_rgb(100, 100, 100),
-      };
-      let dim_color = egui::Color32::from_rgb(color.r() - 25, color.g() - 25, color.b() - 25);
-      ui.painter().rect_filled(rect, 3.0, color);
-      for i in 0..3 {
-        let rect = egui::Rect::from_min_size(
-          rect.left_top() + egui::vec2(2.0, 2.0 + 6.0 * i as f32),
-          egui::vec2(16.0, 4.0),
-        );
-        ui.painter().rect_filled(rect, 2.0, dim_color);
+      if !matches!(element.contents, ElementContents::Header(_)) {
+        let (rect, response) =
+          ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click_and_drag());
+        if response.clicked_by(egui::PointerButton::Primary) {
+          println!("Clicked!");
+          // FIXME: Implement shift click to select a range.
+          // Toggle selection.
+          println!("Selected: {}", element.is_selected);
+          element.is_selected ^= true;
+          // Check if this is a ctrl click that selects an interval.
+          let ctrl_held = ui.input(|inp| inp.modifiers.command_only());
+          if let Some(record) = last_few_clicks.last() && ctrl_held {
+            *range_select = Some((record.id, element.id));
+          }
+          last_few_clicks.push(ClickRecord {
+            id: element.id,
+            index: element_index,
+            time: Instant::now(),
+            ctrl_held,
+          });
+          if last_few_clicks.len() > 5 {
+            last_few_clicks.remove(0);
+          }
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+          *begin_drag_args = Some((rect.left_top(), element.id));
+        }
+        if response.drag_released() {
+          println!("Drag released!");
+          *clear_drag_flag = true;
+        }
+        if !force_show && Self::is_part_of_drag(&drag_state, element) {
+          return;
+        }
+        let color = match (element.is_selected, response.hovered() || force_show) {
+          (true, _) => egui::Color32::from_rgb(100, 100, 250),
+          (false, true) => egui::Color32::from_rgb(100, 100, 175),
+          (false, false) => egui::Color32::from_rgb(100, 100, 100),
+        };
+        let dim_color = egui::Color32::from_rgb(color.r() - 25, color.g() - 25, color.b() - 25);
+        ui.painter().rect_filled(rect, 3.0, color);
+        for i in 0..3 {
+          let rect = egui::Rect::from_min_size(
+            rect.left_top() + egui::vec2(2.0, 2.0 + 6.0 * i as f32),
+            egui::vec2(16.0, 4.0),
+          );
+          ui.painter().rect_filled(rect, 2.0, dim_color);
+        }
       }
       // ui.label(format!("Element {}   {:.1} -> {:.1}", element.value, element.drag_y, element.target_y));
-      ui.label(format!("Element {}", element.value));
+      match &element.contents {
+        ElementContents::Value(value) => ui.label(format!("Element {}", value)),
+        ElementContents::Header(value) => ui.label(format!("Header {}", value)),
+      };
       if ui.button("Delete").clicked() {
         //self.value = 0;
       }
@@ -213,12 +268,15 @@ impl DndDemo {
 
     let drag_count = self.elements.iter().filter(|element| Self::is_part_of_drag(&self.drag_state, element)).count();
 
-    self.split_point = 0;
+    // Split point starts at 1, because we never want to go above the top header.
+    self.split_point = 1;
     let mut window_open = true;
     let mut begin_drag_args = None;
+    let mut clear_drag_flag = false;
+    let mut range_select = None;
 
     egui::Window::new("DndDemo").open(&mut window_open).resizable(true).show(egui_ctx, |ui| {
-      ui.label("Drag elements to reorder them.");
+      ui.label(format!("Drag elements to reorder them. drag_state: {:?}", self.drag_state.is_some()));
       let spot = ui.next_widget_position();
       //let spot = egui::Pos2::new(100.0, 100.0);
       //println!("Spot: {:?}", spot);
@@ -243,7 +301,7 @@ impl DndDemo {
         //println!("Rect: {:?}", rect);
         let is_part_of_drag = Self::is_part_of_drag(&self.drag_state, element);
         ui.allocate_ui_at_rect(rect, |ui| {
-          Self::draw_element(false, &self.drag_state, &mut begin_drag_args, element, ui);
+          Self::draw_element(false, &self.drag_state, &mut begin_drag_args, &mut clear_drag_flag, &mut self.last_few_clicks, &mut range_select, element, element_index, ui);
         });
         // ui.put(rect, ElementRenderRequest {
         //   demo: self,
@@ -258,6 +316,10 @@ impl DndDemo {
 
     if let Some((element_left_top, dragged_id)) = begin_drag_args {
       self.begin_drag(mouse_pos, element_left_top, dragged_id);
+    }
+
+    if clear_drag_flag {
+      self.clear_drag_state();
     }
 
     if have_active_drag {
@@ -287,7 +349,7 @@ impl DndDemo {
         let grabbed_offset = mouse_pos + drag_state.offset;
         grabbed_element.drag_y.current = 0.0;
 
-        for element in &mut self.elements {
+        for (element_index, element) in self.elements.iter_mut().enumerate() {
           let y = match Self::is_part_of_drag(&self.drag_state, element) {
             true => &mut element.drag_y,
             false => &mut element.list_y,
@@ -299,13 +361,23 @@ impl DndDemo {
               .fixed_pos(pos2(grabbed_offset.x, grabbed_offset.y + element.drag_y.current))
               .order(egui::Order::Foreground)
               .show(egui_ctx, |ui| {
-                Self::draw_element(true, &self.drag_state, &mut begin_drag_args, element, ui);
+                Self::draw_element(true, &self.drag_state, &mut begin_drag_args, &mut clear_drag_flag, &mut self.last_few_clicks, &mut range_select, element, element_index, ui);
               });
           }
         }
 
         // We need to make sure that things animate properly.
         egui_ctx.request_repaint();
+      }
+    }
+
+    if let Some((a, b)) = range_select {
+      let get_index = |id| self.elements.iter().position(|e| e.id == id);
+      if let (Some(a), Some(b)) = (get_index(a), get_index(b)) {
+        let (a, b) = if a < b { (a, b) } else { (b, a) };
+        for element in &mut self.elements[a..=b] {
+          element.is_selected = true;
+        }
       }
     }
   }
