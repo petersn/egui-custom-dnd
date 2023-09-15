@@ -26,24 +26,22 @@ struct DragState {
 #[derive(Clone)]
 struct Element {
   id:           u64,
+  value:        i32,
   list_y:       Cell<f32>,
   drag_y:       Cell<f32>,
   target_y:     Cell<f32>,
-  value:        i32,
   is_selected:  Cell<bool>,
-  hide_me:      Cell<bool>,
 }
 
 impl Element {
   fn from_value(value: i32) -> Self {
     Self {
       id: new_scratch_nonce(),
+      value,
       list_y: Cell::new(0.0),
       drag_y: Cell::new(0.0),
       target_y: Cell::new(0.0),
-      value,
       is_selected: Cell::new(false),
-      hide_me: Cell::new(false),
     }
   }
 }
